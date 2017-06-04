@@ -1,0 +1,317 @@
+---
+title: "Project 1"
+output: html_notebook
+---
+
+```{r Load Data, message=FALSE, warning=FALSE, include=FALSE}
+
+## This chunk will not print in output ##
+
+library(magrittr)
+library(tidyverse)
+library(caret)
+library(broom)
+library(ROCR)
+library(h2o)
+
+#Set seed now before training split, and again before training each model to compare with others
+set.seed(444)
+
+#Load data
+df <- read_csv("oj.csv") %>% 
+  map_at(c("Purchase", "Store7", "STORE", "StoreID"), as.factor) %>% 
+  as_tibble %>% 
+  mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase)) %>% 
+  select(-STORE, -Store7)
+
+#Build train and test set 
+df <- df[!duplicated(df),] #Found some duplicates in rows
+train <- df %>% sample_frac(.8)
+test  <- df %>% setdiff(train)
+```
+
+
+
+```{r Build Logistic Model in Caret, message=FALSE, warning=FALSE, include=FALSE}
+
+## Create trainControl
+trainControl <- trainControl(method = "repeatedcv",
+                           number = 3,
+                           repeats = 3,
+                           summaryFunction = twoClassSummary,
+                           classProbs = TRUE,
+                           returnResamp = "all"
+                           )
+
+# Build Logistic model and look at results
+set.seed(444)
+logistic_model <- train(Purchase ~ .,  
+                data = train, 
+                method = "glm", 
+                family = "binomial", 
+                trControl = trainControl,
+                metric = "ROC",
+                preProcess = c("center", "scale")
+                )
+
+test %<>% mutate(glm_preds = factor(predict(logistic_model, newdata = test)))
+glm_cfm <- confusionMatrix(test$glm_preds, test$Purchase)
+
+#Look at variable importances and coefficients for logistic model
+varImp(logistic_model) %>% plot(main = "Variable Importances for Logistic Model")
+
+#Consider performance of the model on test set
+glm_auc <- (predict(logistic_model, test, type = "prob") %>% 
+  select(MM) %>% 
+  prediction(test$Purchase) %>% 
+  performance("auc"))@y.values[[1]][1]
+
+
+
+```
+
+
+```{r Build Logistic Model with glmnet, message=FALSE, warning=FALSE, include=FALSE}
+
+## Create tuneGrid
+tuneGrid = expand.grid(.alpha = seq(.2, .55, length = 15), 
+                       .lambda = seq(0.025, .125, length = 10)
+                       )
+
+# Build Logistic model and look at results
+set.seed(444)
+glmnet_model <- train(Purchase ~ .,  
+                data = train, 
+                method = "glmnet", 
+                family = "binomial", 
+                trControl = trainControl,
+                tuneGrid = tuneGrid,
+                metric = "ROC",
+                preProcess = c("center", "scale")
+                )
+glmnet_model
+
+test %<>% mutate(glmnet_preds = factor(predict(glmnet_model, newdata = test)))
+confusionMatrix(data = test$glmnet_preds, test$Purchase)
+
+varImp(glmnet_model) %>% plot(main = "Variable Importances for GLMNET Model")
+
+#Best alpha
+ggplot() +
+  geom_line(data = glmnet_model$results %>% group_by(alpha) %>% summarise(ROC = median(ROC)),
+              aes(alpha, ROC))
+#Best lambda
+ggplot() +
+  geom_line(data = glmnet_model$results %>% group_by(lambda) %>% summarise(ROC = median(ROC)),
+              aes(lambda, ROC))
+
+#Consider performance of the model
+glmnet_auc <- (predict(glmnet_model, test, type = "prob") %>% 
+  select(MM) %>% 
+  prediction(test$Purchase) %>% 
+  performance("auc"))@y.values[[1]][1]
+
+#Test parameters for statistically significant difference in auc performance
+glmnet_model$resample %>% 
+  lm(ROC ~ factor(alpha) + factor(lambda), .) %>% 
+  summary %>% 
+  tidy %>% 
+  arrange(p.value)
+
+#Visualize distributions of performance for each model (10 folds * 3 repeats = 30 runs of each model)
+glmnet_model$resample %>% 
+  select(alpha, lambda) %>% 
+  distinct %>%
+  mutate(model_number = 1:nrow(.)) %>% 
+  right_join(glmnet_model$resample, by = c("alpha", "lambda")) %>% 
+  ggplot(aes(ROC, group = model_number, color = model_number)) + 
+  geom_density() +
+  scale_alpha_continuous(range = c(0.1, 1)) +
+  geom_vline(xintercept = (glmnet_model$resample %>% group_by(alpha, lambda) %>% summarise(median(ROC)) %>% max), color = "red") + 
+  geom_vline(xintercept = (glmnet_model$resample %>% group_by(alpha, lambda) %>% summarise(roc = median(ROC)) %>% ungroup %>% summarise(min(roc)) %>% min), color = "red") +
+  labs(title = "Difference between models is not statistically significant",
+       subtitle = "Of the 150 models, the best and worst performers are still very close")
+
+```
+
+
+```{r Build Support Vector Machine, message=FALSE, warning=FALSE, include=FALSE}
+
+## Update trainControl
+trainControl <- trainControl(method = "repeatedcv",
+                           number = 3,
+                           repeats = 3,
+                           summaryFunction = twoClassSummary,
+                           classProbs = TRUE,
+                           returnResamp = "all"
+                           )
+
+## Update tuneGrid
+tuneGrid = expand.grid(sigma = seq(.01, 1, length = 10), 
+                       C = seq(0.5, 10, length = 10)
+                       )
+
+
+###### Build SVM model
+set.seed(444)
+svm_model <- train(Purchase ~ ., 
+                 data = train, 
+                 method = 'svmRadial',  
+                 trControl = trainControl,
+                 preProc = c("center","scale"),
+                 metric = "ROC",
+                 verbose = FALSE,
+                 probability = TRUE,
+                 tuneGrid = tuneGrid
+                 )
+
+## Consider performance of model
+
+test %<>% mutate(svm_preds = factor(predict(svm_model, newdata = test, probability = TRUE)))
+confusionMatrix(data = test$svm_preds, test$Purchase)
+
+svm_auc <- (predict(svm_model, test, type = "prob") %>% 
+  select(MM) %>% 
+  prediction(test$Purchase) %>% 
+  performance("auc"))@y.values[[1]][1]
+
+```
+
+
+```{r Build Random Forest, message=FALSE, warning=FALSE, include=FALSE}
+
+## Update trainControl
+trainControl <- trainControl(method = "repeatedcv",
+                           number = 3,
+                           repeats = 3,
+                           summaryFunction = twoClassSummary,
+                           classProbs = TRUE,
+                           returnResamp = "all"
+                           )
+
+mtry <- sqrt(ncol(train))
+tuneGrid <- expand.grid(.mtry = mtry)
+
+###### Build SVM model
+set.seed(444)
+rf_model <- train(Purchase ~ ., 
+                 data = train, 
+                 method = 'rf',  
+                 trControl = trainControl,
+                 metric = "ROC",
+                 verbose = FALSE,
+                 probability = TRUE,
+                 tuneGrid = tuneGrid
+                 )
+
+## Consider performance of model
+test$rf_preds <- predict(rf_model, newdata = test, probability = TRUE)
+confusionMatrix(data = test$rf_preds, test$Purchase)
+rf_auc <- (predict(rf_model, test, type = "prob") %>% 
+  select(MM) %>% 
+  prediction(test$Purchase) %>% 
+  performance("auc"))@y.values[[1]][1]
+
+
+## Used to visualize and select best mtry
+# rf_model$results %>% 
+#   ggplot(aes(mtry, ROC)) + geom_point()
+# 
+# rf_model$resample %>% 
+#   group_by(mtry) %>% 
+#   summarise(roc = median(ROC)) %>% 
+#   ggplot(aes(mtry, roc)) + geom_line()
+
+```
+
+
+```{r Look at errors of each model, message=FALSE, warning=FALSE, include=FALSE}
+
+results <- data_frame(model = c("Basic Logistic",
+                                "Elasticnet Logistic",
+                                "Support Vector Machine",
+                                "Random Forest"),
+                      auc = c(glm_auc,
+                              glmnet_auc,
+                              svm_auc,
+                              rf_auc))
+
+```
+
+
+```{r}
+
+h2o.init(nthreads = -1)
+
+
+h2o_train <- as.h2o(train)
+h2o_test <- as.h2o(test)
+
+set.seed(444)
+h2o_glm <- h2o.glm(y = "Purchase", 
+                  x = setdiff(colnames(h2o_train), "Purchase"), 
+                  training_frame = h2o_train,
+                  family = "binomial",
+                  nfolds = 3,
+                  solver = "AUTO",
+                  alpha = 0:1,
+                  lambda_search = T,
+                  standardize = T
+                  )
+
+test$h2o_glm_preds <- (h2o_glm %>% h2o.predict(h2o_test))$predict %>% as.vector %>% factor
+
+h2o.varimp(h2o_glm)
+h2o.varimp_plot(h2o_glm)
+
+(prediction(ifelse(test$h2o_glm_preds == "CH", 1, 0), 
+            ifelse(test$Purchase == "CH", 1, 0)) %>% 
+    performance("auc"))@y.values[[1]][1]
+
+h2o_glm_perf <- h2o.performance(h2o_glm, h2o_test)
+h20_glm_auc <- h2o_glm_perf@metrics$AUC
+```
+
+
+```{r}
+set.seed(444)
+h2o_gbm <- h2o.gbm(y = "Purchase", 
+                  x = setdiff(colnames(h2o_train), "Purchase"), 
+                  training_frame = h2o_train
+                  )
+h2o_gbm_perf <- h2o.performance(h2o_gbm, h2o_test)
+h20_gbm_auc <- h2o_gbm_perf@metrics$AUC
+```
+
+
+```{r}
+set.seed(444)
+h2o_rf <- h2o.randomForest(y = "Purchase", 
+                  x = setdiff(colnames(h2o_train), "Purchase"), 
+                  training_frame = h2o_train,
+                  stopping_metric = "AUC"
+                  )
+h2o_rf_perf <- h2o.performance(h2o_rf, h2o_test)
+h20_rf_auc <- h2o_rf_perf@metrics$AUC
+```
+
+
+
+```{r}
+results %<>% bind_rows(data_frame(model = c("h2o GLM", "h2o GBM", "h2o Random Forest"),
+                                 auc = c(h20_glm_auc, h20_gbm_auc, h20_rf_auc)
+                                 )
+                      )
+                      
+```
+
+
+# Overview
+
+# Problem Definition
+
+# Methods
+
+# Results
+
+# Recommendations
