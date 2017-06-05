@@ -251,22 +251,22 @@ h2o_glm <- h2o.glm(y = "Purchase",
                   training_frame = h2o_train,
                   family = "binomial",
                   nfolds = 3,
-                  solver = "AUTO",
-                  alpha = 0:1,
-                  lambda_search = T,
+                  solver = "IRLSM",
+                  lambda = 0,
+                  remove_collinear_columns = T,
                   standardize = T,
                   balance_classes = T,
-                  fold_assignment = "Stratified"
+                  fold_assignment = "Stratified",
+                  compute_p_values = T
                   )
+
+
+summary(h2o_glm)
 
 test$h2o_glm_preds <- (h2o_glm %>% h2o.predict(h2o_test))$predict %>% as.vector %>% factor
 
 h2o.varimp(h2o_glm)
 h2o.varimp_plot(h2o_glm)
-
-(prediction(ifelse(test$h2o_glm_preds == "CH", 1, 0), 
-            ifelse(test$Purchase == "CH", 1, 0)) %>% 
-    performance("auc"))@y.values[[1]][1]
 
 h2o_glm_perf <- h2o.performance(h2o_glm, h2o_test)
 h2o_glm_auc <- h2o_glm_perf@metrics$AUC
@@ -288,12 +288,7 @@ h2o_gbm_auc <- h2o_gbm_perf@metrics$AUC
 
 ```{r Build random forest model on an h2o cluster, message=FALSE, warning=FALSE, include=FALSE}
 set.seed(444)
-h2o_rf <- h2o.grid("randomForest",
-                  hyper_params = list(ntrees = ,
-                                      max_depth = ,
-                                      min_rows = c()
-                                      ),
-                  y = "Purchase", 
+h2o_rf <- h2o.randomForest(y = "Purchase", 
                   x = setdiff(colnames(h2o_train), "Purchase"), 
                   training_frame = h2o_train,
                   stopping_metric = "AUC",
@@ -341,6 +336,81 @@ The goal of this analysis is to understand how to make the Orange Juice category
 
 # Problem Definition
 
+Brand manager
+1. What predictor variables influence the sales of MM?
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+h2o_glm@model$coefficients_table %>% 
+  as_tibble %>% 
+  mutate(sign = factor(ifelse(standardized_coefficients >= 0, 1, 0)),
+         significant = (ifelse(p_value <= .05, 1, 0) %>% factor)) %>%
+  filter(!is.na(p_value)) %>% 
+  ggplot(aes(x = reorder(names, abs(standardized_coefficients)), 
+             y = abs(standardized_coefficients), 
+             fill = sign,
+             alpha = significant)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(title = "Discounts, relative prices, and brand loyalty matter",
+         y = "Influence of each factor on a customer's decision to purchase Minute Maid",
+         x = element_blank()) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.ticks.y = element_blank(),
+          legend.position = c(.85, 0.15),
+          legend.title = element_blank(),
+          panel.background = element_blank()
+          ) +
+    scale_fill_discrete(breaks = c(1, 0),
+                        labels = c("More Likely to buy MM", "Less likely to buy MM")
+                        ) +
+    scale_alpha_discrete(guide = "none", range = c(.15, 1))
+  
+```
+
+2. Are all the variables in the dataset effective or are some more effective than
+others?
+
+```{r}
+h2o_glm@model$coefficients_table %>% 
+  as_tibble %>% 
+  transmute(names = names,
+            p_value = p_value,
+            significant = (ifelse(p_value <= .05, 1, 0) %>% factor),
+            removed = ifelse(is.na(p_value), 1, 0)) %>% 
+  filter(!is.na(significant)) %>% 
+  ggplot(aes(reorder(names, -abs(p_value)), 1 - p_value, fill = significant, label = round(p_value, 2))) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(title = "Only a few factors in the model are statistically significant",
+         y = "Statistical confidence that this result could not have happened by chance",
+         x = element_blank()) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.ticks.y = element_blank(),
+          legend.position = c(.75, 0.15),
+          legend.title = element_blank(),
+          panel.background = element_blank()
+          ) +
+    geom_text(nudge_y = -.03) +
+    scale_fill_discrete(breaks = c(01,0), labels = c("Statistically significant", "Not statistically significant"))
+```
+
+
+3. How confident are you in your recommendations?
+
+```{r}
+h2o_glm
+```
+
+
+4. Based on your analysis what are specific recommendations you have for the
+brand manager?
+Sales manager
+1. Can you provide him a predictive model that can tell him the probability of
+customers buying MM?
+2. How good is the model in its predictions?
+3. How confident are you in your recommendations?
 
 
 
@@ -349,3 +419,8 @@ The goal of this analysis is to understand how to make the Orange Juice category
 # Results
 
 # Recommendations
+
+
+
+
+
