@@ -5,8 +5,6 @@ output: html_notebook
 
 ```{r Load Data, message=FALSE, warning=FALSE, include=FALSE}
 
-## This chunk will not print in output ##
-
 library(magrittr)
 library(tidyverse)
 library(caret)
@@ -192,7 +190,7 @@ trainControl <- trainControl(method = "repeatedcv",
 mtry <- sqrt(ncol(train))
 tuneGrid <- expand.grid(.mtry = mtry)
 
-###### Build SVM model
+###### Build RF model
 set.seed(444)
 rf_model <- train(Purchase ~ ., 
                  data = train, 
@@ -239,7 +237,7 @@ results <- data_frame(model = c("Basic Logistic",
 ```
 
 
-```{r}
+```{r Build GLM model on an h2o cluster, message=FALSE, warning=FALSE, include=FALSE}
 
 h2o.init(nthreads = -1)
 
@@ -256,7 +254,9 @@ h2o_glm <- h2o.glm(y = "Purchase",
                   solver = "AUTO",
                   alpha = 0:1,
                   lambda_search = T,
-                  standardize = T
+                  standardize = T,
+                  balance_classes = T,
+                  fold_assignment = "Stratified"
                   )
 
 test$h2o_glm_preds <- (h2o_glm %>% h2o.predict(h2o_test))$predict %>% as.vector %>% factor
@@ -269,46 +269,80 @@ h2o.varimp_plot(h2o_glm)
     performance("auc"))@y.values[[1]][1]
 
 h2o_glm_perf <- h2o.performance(h2o_glm, h2o_test)
-h20_glm_auc <- h2o_glm_perf@metrics$AUC
+h2o_glm_auc <- h2o_glm_perf@metrics$AUC
 ```
 
 
-```{r}
+```{r Build GBM model on an h2o cluster, message=FALSE, warning=FALSE, include=FALSE}
 set.seed(444)
 h2o_gbm <- h2o.gbm(y = "Purchase", 
                   x = setdiff(colnames(h2o_train), "Purchase"), 
-                  training_frame = h2o_train
+                  training_frame = h2o_train,
+                  stopping_metric = "AUC",
+                  balance_classes = T
                   )
 h2o_gbm_perf <- h2o.performance(h2o_gbm, h2o_test)
-h20_gbm_auc <- h2o_gbm_perf@metrics$AUC
+h2o_gbm_auc <- h2o_gbm_perf@metrics$AUC
 ```
 
 
-```{r}
+```{r Build random forest model on an h2o cluster, message=FALSE, warning=FALSE, include=FALSE}
 set.seed(444)
-h2o_rf <- h2o.randomForest(y = "Purchase", 
+h2o_rf <- h2o.grid("randomForest",
+                  hyper_params = list(ntrees = ,
+                                      max_depth = ,
+                                      min_rows = c()
+                                      ),
+                  y = "Purchase", 
                   x = setdiff(colnames(h2o_train), "Purchase"), 
                   training_frame = h2o_train,
-                  stopping_metric = "AUC"
+                  stopping_metric = "AUC",
+                  balance_classes = T,
+                  nfolds = 3
                   )
 h2o_rf_perf <- h2o.performance(h2o_rf, h2o_test)
-h20_rf_auc <- h2o_rf_perf@metrics$AUC
+h2o_rf_auc <- h2o_rf_perf@metrics$AUC
 ```
 
 
+```{r Build deep neural net on an h2o cluster, message=FALSE, warning=FALSE, include=FALSE}
+set.seed(444)
+h2o_dl <- h2o.deeplearning(y = "Purchase", 
+                  x = setdiff(colnames(h2o_train), "Purchase"), 
+                  training_frame = h2o_train,
+                  epochs = 1000,
+                  stopping_metric = "AUC",
+                  balance_classes = T
+                  )
+h2o_dl_perf <- h2o.performance(h2o_dl, h2o_test)
+h2o_dl_auc <- h2o_dl_perf@metrics$AUC
+```
 
-```{r}
-results %<>% bind_rows(data_frame(model = c("h2o GLM", "h2o GBM", "h2o Random Forest"),
-                                 auc = c(h20_glm_auc, h20_gbm_auc, h20_rf_auc)
-                                 )
-                      )
+
+```{r Add h2o results to previous results dataframe, message=FALSE, warning=FALSE, include=FALSE}
+results %<>% bind_rows(data_frame(model = c("h2o GLM", 
+                                            "h2o GBM", 
+                                            "h2o Random Forest", 
+                                            "h2o Neural Net"),
+                                  auc = c(h2o_glm_auc, 
+                                          h2o_gbm_auc, 
+                                          h2o_rf_auc, 
+                                          h2o_dl_auc)
+                                  )
+                       )
                       
 ```
 
 
 # Overview
 
+The goal of this analysis is to understand how to make the Orange Juice category of store sales perform better.  The store sells two brands of orange juice, Minute Maid (MM) and Citrus Hill (CH).  Since MM has higher margins than CH, this analysis will make recommendations regarding which factors influence a consumer's decision to purchase MM orange juice.  This allows our compaqny to leverage those factors as opportunities to influence MM sales.  It will additionally provide a predictive model for more precise forecasting.  This forecasting will be of benefit now, but will be of tremendous benefit later when the company adjusts its marketing to increase MM sales (since an updated forecast will be required).
+
+
 # Problem Definition
+
+
+
 
 # Methods
 
