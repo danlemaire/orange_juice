@@ -401,6 +401,36 @@ h2o_glm@model$coefficients_table %>%
 
 ```{r}
 
+variance_of_model_df <- data_frame(round = numeric(), performance = numeric())
+
+for (i in 1:30) {
+  set.seed(i)
+  
+  split <- h2o.splitFrame(as.h2o(df), .8)
+  h2o_tr <- split[[1]]
+  h2o_te <- split[[2]]
+  
+  h2o_glm <- h2o.glm(y = "Purchase", 
+                x = setdiff(colnames(h2o_tr), "Purchase"), 
+                training_frame = h2o_tr,
+                family = "binomial",
+                nfolds = 3,
+                solver = "IRLSM",
+                lambda = 0,
+                remove_collinear_columns = T,
+                standardize = T,
+                balance_classes = T,
+                fold_assignment = "Stratified",
+                compute_p_values = T
+                )
+  variance_of_model_df[i,] <- c(round = i, performance = (h2o.performance(h2o_glm, h2o_te))@metrics$AUC)
+  #print(i)
+}
+
+variance_of_model_df %>%  
+  ggplot(aes(performance)) +
+    geom_density()
+
 
 
 
