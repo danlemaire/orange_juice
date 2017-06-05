@@ -400,8 +400,12 @@ h2o_glm@model$coefficients_table %>%
 3. How confident are you in your recommendations?
 
 ```{r}
-h2o_glm
+
+
+
+
 ```
+
 
 
 4. Based on your analysis what are specific recommendations you have for the
