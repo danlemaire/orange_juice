@@ -11,6 +11,7 @@ library(caret)
 library(broom)
 library(ROCR)
 library(h2o)
+library(scales)
 
 #Set seed now before training split, and again before training each model to compare with others
 set.seed(444)
@@ -241,7 +242,7 @@ results <- data_frame(model = c("Basic Logistic",
 
 h2o.init(nthreads = -1)
 
-
+set.seed(444)
 h2o_train <- as.h2o(train)
 h2o_test <- as.h2o(test)
 
@@ -262,14 +263,12 @@ h2o_glm <- h2o.glm(y = "Purchase",
 
 
 summary(h2o_glm)
-
-test$h2o_glm_preds <- (h2o_glm %>% h2o.predict(h2o_test))$predict %>% as.vector %>% factor
-
 h2o.varimp(h2o_glm)
 h2o.varimp_plot(h2o_glm)
 
-h2o_glm_perf <- h2o.performance(h2o_glm, h2o_test)
-h2o_glm_auc <- h2o_glm_perf@metrics$AUC
+test$h2o_glm_preds <- (h2o_glm %>% h2o.predict(h2o_test))$predict %>% as.vector %>% factor
+
+h2o_glm_auc <- (h2o.performance(h2o_glm, h2o_test))@metrics$AUC
 ```
 
 
@@ -371,7 +370,7 @@ h2o_glm@model$coefficients_table %>%
 2. Are all the variables in the dataset effective or are some more effective than
 others?
 
-```{r}
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
 h2o_glm@model$coefficients_table %>% 
   as_tibble %>% 
   transmute(names = names,
@@ -379,7 +378,11 @@ h2o_glm@model$coefficients_table %>%
             significant = (ifelse(p_value <= .05, 1, 0) %>% factor),
             removed = ifelse(is.na(p_value), 1, 0)) %>% 
   filter(!is.na(significant)) %>% 
-  ggplot(aes(reorder(names, -abs(p_value)), 1 - p_value, fill = significant, label = round(p_value, 2))) +
+  ggplot(aes(reorder(names, -abs(p_value)), 
+             1 - p_value, 
+             fill = significant, 
+             alpha = significant,
+             label = round(p_value, 2))) +
     geom_bar(stat = "identity") +
     coord_flip() +
     labs(title = "Only a few factors in the model are statistically significant",
@@ -392,18 +395,19 @@ h2o_glm@model$coefficients_table %>%
           legend.title = element_blank(),
           panel.background = element_blank()
           ) +
-    geom_text(nudge_y = -.03) +
-    scale_fill_discrete(breaks = c(01,0), labels = c("Statistically significant", "Not statistically significant"))
+    geom_text(nudge_y = -.025, size = 3) +
+    scale_fill_discrete(breaks = c(01,0), labels = c("Statistically significant", "Not statistically significant")) +
+    scale_alpha_discrete(guide = "none", range = c(.35, 1))
 ```
 
 
 3. How confident are you in your recommendations?
 
-```{r}
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
 
 variance_of_model_df <- data_frame(round = numeric(), performance = numeric())
 
-for (i in 1:30) {
+for (i in 1:100) {
   set.seed(i)
   
   split <- h2o.splitFrame(as.h2o(df), .8)
@@ -429,20 +433,72 @@ for (i in 1:30) {
 
 variance_of_model_df %>%  
   ggplot(aes(performance)) +
-    geom_density()
-
-variance_of_model_df$performance %>% sd
-
-
-
+    geom_density() +
+    geom_errorbarh(aes(x = median(variance_of_model_df$performance), 
+                       xmin = median(variance_of_model_df$performance) - sd(variance_of_model_df$performance), 
+                       xmax = median(variance_of_model_df$performance) + sd(variance_of_model_df$performance), 
+                       y = 10,
+                       color = "red"
+                       )) +
+    labs(title = "95% Confidence Interval of GLM Performance on Test Set",
+         subtitle = "*This is a good proxy for expected performance on future data",
+         x = "Performance of model with 100 random splits",
+         y = element_blank()
+         ) +
+    geom_text(aes(x, y, label = x),
+              data_frame(x = c(round(median(variance_of_model_df$performance) - sd(variance_of_model_df$performance), 4), 
+                               round(median(variance_of_model_df$performance), 4), 
+                               round(median(variance_of_model_df$performance) + sd(variance_of_model_df$performance), 4)),
+                         y = 11),
+              size = c(4,10,4),
+              color = "red"
+              ) +
+    theme(axis.ticks.y = element_blank(),
+          axis.text.y = element_blank(),
+          legend.position = "none"
+          )
 
 ```
-
 
 
 4. Based on your analysis what are specific recommendations you have for the
 brand manager?
 
+```{r, message=FALSE, warning=FALSE}
+#Create dataframe with means for all values, grouped by store, and a grid of possible prices for each brand of oj
+sens_analysis_df <- train %>% 
+  group_by(StoreID) %>% 
+  summarise_all(mean) %>% 
+  slice(rep(1:n(), each = 50)) %>% 
+  mutate(PriceCH2 = rep(c(seq(1.5, 2.5, length = 25), rep(NA, 25)), 5),
+         PriceCH = ifelse(is.na(PriceCH2), PriceCH, PriceCH2),
+         PriceMM2 = rep(c(rep(NA, 25), seq(1.5, 2.5, length = 25)), 5),
+         PriceMM = ifelse(is.na(PriceMM2), PriceMM, PriceMM2)
+         ) %>% 
+  select(-Purchase)
+
+summary(sens_analysis_df$isMean)
+
+
+h2o.predict(h2o_glm, as.h2o(sens_analysis_df)) %>% 
+  as_tibble %>% 
+  bind_cols(sens_analysis_df) %>% 
+  mutate(StoreID = factor(StoreID, 
+                          labels = c("Store #1", "Store #2", "Store #3", "Store #4", "Store #7"))) %>% 
+  ggplot() +
+    geom_line(aes(PriceCH2, CH, color = predict)) +
+    #geom_smooth(aes(PriceCH2, CH, color = predict)) +
+    geom_line(aes(PriceMM2, MM, color = predict)) +
+    #geom_smooth(aes(PriceMM2, MM, color = predict)) +
+    facet_grid(StoreID~.) +
+    #geom_hline(yintercept = .5) +
+    scale_y_continuous(labels = percent, breaks = c(.5, 1)) +
+    labs(title = "Pricing opportunities per store",
+         x = "Selling Price of Orange Juice",
+         y = "Probability of Purchasing Each Brand")
+
+
+```
 
 
 
@@ -469,4 +525,16 @@ customers buying MM?
 
 
 
+
+
+
+```{r}
+
+table(df$Purchase, df$StoreID) %>% 
+  as_tibble %>% 
+  ggplot(aes(Var2, n, fill = Var1)) + 
+    geom_bar(stat = "identity", position = "fill")
+
+
+```
 
