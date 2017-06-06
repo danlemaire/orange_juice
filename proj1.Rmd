@@ -431,6 +431,8 @@ variance_of_model_df %>%
   ggplot(aes(performance)) +
     geom_density()
 
+variance_of_model_df$performance %>% sd
+
 
 
 
@@ -440,6 +442,12 @@ variance_of_model_df %>%
 
 4. Based on your analysis what are specific recommendations you have for the
 brand manager?
+
+
+
+
+
+
 Sales manager
 1. Can you provide him a predictive model that can tell him the probability of
 customers buying MM?
@@ -450,7 +458,11 @@ customers buying MM?
 
 # Methods
 
+
+
 # Results
+
+
 
 # Recommendations
 
