@@ -57,14 +57,17 @@ dfbetas(basic_plot) %>%
   as_tibble %>% 
   summarise_all(sd)
 
+#Correlation Plot
 train %>% 
   mutate(Purchase = ifelse(Purchase == "MM", 1, 0),
          StoreID = as.numeric(StoreID)) %>% 
   cor %>% 
-  corrplot(method = c("number"), type = "upper")
+  corrplot.mixed(lower = "square", upper = "number")
 
-ggpairs(train)
+#Inspect relationships between  variables
+pairs <- ggpairs(train)
 
+#Compare Monthly and Weekly trends in OJ Sales
 train %>% 
   mutate(MonthofPurchase = ceiling(WeekofPurchase/(52/12))) %>% 
   group_by(MonthofPurchase, StoreID) %>% 
@@ -82,7 +85,7 @@ train %>%
     labs(title = "OJ Sales by Store and Month") +
     scale_x_continuous(breaks = seq(0,12,2))
 
-train %>% 
+ train %>% 
   group_by(WeekofPurchase, StoreID) %>% 
   tally(Purchase == "MM") %>% 
   ungroup %>% 
@@ -96,6 +99,20 @@ train %>%
     geom_smooth(method = "lm", formula = y ~ poly(x, 1)) +
     facet_wrap(~StoreID) +
     labs(title = "OJ Sales by Store and Week")
+ 
+#Very little difference between looking at counts of purchases vs sales
+train %>% 
+  ggplot(aes(StoreID, fill = Purchase)) + 
+    geom_bar(position = "fill") +
+    labs(title = "Number of OJ Purchases at Each Store")
+train %>% 
+  select(Purchase, SalePriceMM, SalePriceCH, StoreID) %>% 
+  gather(OJ, PriceAtRegister, -Purchase, -StoreID) %>% 
+  group_by(StoreID, Purchase) %>% 
+  summarise(sales = sum(PriceAtRegister)) %>% 
+  ggplot(aes(StoreID, sales, fill = Purchase)) + 
+    geom_bar(stat = "identity", position = "fill") +
+    labs(title = "Total Sales of OJ at Each Store")
 
 ```
 
