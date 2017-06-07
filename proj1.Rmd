@@ -30,6 +30,28 @@ test  <- df %>% setdiff(train)
 ```
 
 
+```{r Data Exploration, message=FALSE, warning=FALSE, include=FALSE}
+
+#Diagnostic plots of basic untuned glm model
+par(mfrow = c(2, 2))
+plot(glm(Purchase ~ ., data = train, family = "binomial"))
+par(mfrow = c(1, 1))
+
+#Residuals vs Fitted
+#Linearity Assumption: Some points larger than abs(2) = may be non-linear
+#Homoscedasticity Assumption: Not sure what this means for logistic models
+#Normal Q-Q Plot
+#points seem to lie well along line with some possible shape at extreme ends
+#Scale Location
+#Not sure what this means with logistic regression
+#Residuals vs Leverage
+#No points are even close to being outliers (Cook's distance of 1)
+
+```
+
+
+
+
 
 ```{r Build Logistic Model in Caret, message=FALSE, warning=FALSE, include=FALSE}
 
@@ -339,6 +361,10 @@ Brand manager
 1. What predictor variables influence the sales of MM?
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
 
+df %>% 
+  filter(PriceCH != SalePriceCH & PriceMM != SalePriceMM)
+
+
 h2o_glm@model$coefficients_table %>% 
   as_tibble %>% 
   mutate(sign = factor(ifelse(standardized_coefficients >= 0, 1, 0)),
@@ -435,8 +461,8 @@ variance_of_model_df %>%
   ggplot(aes(performance)) +
     geom_density() +
     geom_errorbarh(aes(x = median(variance_of_model_df$performance), 
-                       xmin = median(variance_of_model_df$performance) - sd(variance_of_model_df$performance), 
-                       xmax = median(variance_of_model_df$performance) + sd(variance_of_model_df$performance), 
+                       xmin = median(variance_of_model_df$performance) - 1.96 * sd(variance_of_model_df$performance), 
+                       xmax = median(variance_of_model_df$performance) + 1.96 * sd(variance_of_model_df$performance), 
                        y = 10,
                        color = "red"
                        )) +
@@ -446,9 +472,9 @@ variance_of_model_df %>%
          y = element_blank()
          ) +
     geom_text(aes(x, y, label = x),
-              data_frame(x = c(round(median(variance_of_model_df$performance) - sd(variance_of_model_df$performance), 4), 
+              data_frame(x = c(round(median(variance_of_model_df$performance) - 1.96 * sd(variance_of_model_df$performance), 4), 
                                round(median(variance_of_model_df$performance), 4), 
-                               round(median(variance_of_model_df$performance) + sd(variance_of_model_df$performance), 4)),
+                               round(median(variance_of_model_df$performance) + 1.96 * sd(variance_of_model_df$performance), 4)),
                          y = 11),
               size = c(4,10,4),
               color = "red"
