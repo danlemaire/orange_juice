@@ -12,6 +12,8 @@ library(broom)
 library(ROCR)
 library(h2o)
 library(scales)
+library(corrplot)
+library(GGally)
 
 #Set seed now before training split, and again before training each model to compare with others
 set.seed(444)
@@ -20,7 +22,7 @@ set.seed(444)
 df <- read_csv("oj.csv") %>% 
   map_at(c("Purchase", "Store7", "STORE", "StoreID"), as.factor) %>% 
   as_tibble %>% 
-  mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase)) %>% 
+  mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase) + 1) %>% 
   select(-STORE, -Store7)
 
 #Build train and test set 
@@ -33,8 +35,10 @@ test  <- df %>% setdiff(train)
 ```{r Data Exploration, message=FALSE, warning=FALSE, include=FALSE}
 
 #Diagnostic plots of basic untuned glm model
+basic_plot <- glm(Purchase ~ ., data = train, family = "binomial")
+
 par(mfrow = c(2, 2))
-plot(glm(Purchase ~ ., data = train, family = "binomial"))
+plot(basic_plot)
 par(mfrow = c(1, 1))
 
 #Residuals vs Fitted
@@ -46,6 +50,52 @@ par(mfrow = c(1, 1))
 #Not sure what this means with logistic regression
 #Residuals vs Leverage
 #No points are even close to being outliers (Cook's distance of 1)
+
+dffits(basic_plot) %>% hist
+
+dfbetas(basic_plot) %>% 
+  as_tibble %>% 
+  summarise_all(sd)
+
+train %>% 
+  mutate(Purchase = ifelse(Purchase == "MM", 1, 0),
+         StoreID = as.numeric(StoreID)) %>% 
+  cor %>% 
+  corrplot(method = c("number"), type = "upper")
+
+ggpairs(train)
+
+train %>% 
+  mutate(MonthofPurchase = ceiling(WeekofPurchase/(52/12))) %>% 
+  group_by(MonthofPurchase, StoreID) %>% 
+  tally(Purchase == "MM") %>% 
+  ungroup %>% 
+  rename(MM = n) %>% 
+  bind_cols((train %>% mutate(MonthofPurchase = ceiling(WeekofPurchase/(52/12))) %>% 
+               group_by(MonthofPurchase, StoreID) %>% tally(Purchase == "CH") %>% 
+               ungroup %>% rename(CH = n) %>% select(CH))) %>% 
+  gather(OJ, Count, -MonthofPurchase, -StoreID) %>% 
+  ggplot(aes(MonthofPurchase, Count, color = OJ)) +
+    geom_line() +
+    geom_smooth(method = "lm", formula = y ~ poly(x, 1)) +
+    facet_wrap(~StoreID) +
+    labs(title = "OJ Sales by Store and Month") +
+    scale_x_continuous(breaks = seq(0,12,2))
+
+train %>% 
+  group_by(WeekofPurchase, StoreID) %>% 
+  tally(Purchase == "MM") %>% 
+  ungroup %>% 
+  rename(MM = n) %>% 
+  bind_cols((train %>% 
+               group_by(WeekofPurchase, StoreID) %>% tally(Purchase == "CH") %>% 
+               ungroup %>% rename(CH = n) %>% select(CH))) %>% 
+  gather(OJ, Count, -WeekofPurchase, -StoreID) %>% 
+  ggplot(aes(WeekofPurchase, Count, color = OJ)) +
+    geom_line() +
+    geom_smooth(method = "lm", formula = y ~ poly(x, 1)) +
+    facet_wrap(~StoreID) +
+    labs(title = "OJ Sales by Store and Week")
 
 ```
 
