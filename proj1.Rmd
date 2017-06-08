@@ -114,6 +114,37 @@ train %>%
     geom_bar(stat = "identity", position = "fill") +
     labs(title = "Total Sales of OJ at Each Store")
 
+train %>% 
+  #group_by(WeekofPurchase, StoreID) %>% 
+  #summarise(loyalty = mean(LoyalCH),
+  #          price = mean(PriceCH)) %>% 
+  ggplot() + 
+    geom_smooth(aes(WeekofPurchase, LoyalCH - .5, color = StoreID)) +
+    #geom_line(aes(WeekofPurchase, PriceCH, color = StoreID)) +
+    geom_smooth(aes(WeekofPurchase, PriceDiff, color = StoreID), size = 2) +
+    #geom_line(aes(WeekofPurchase, PriceMM, color = StoreID), size = 2) +
+    facet_wrap(~StoreID)
+
+#Difference in Sell Price of OJ at time of Purchase
+train %>% 
+  group_by(Purchase) %>% 
+  summarise(MM = mean(SalePriceMM),
+            CH = mean(SalePriceCH)) %>% 
+  mutate(MM = dollar(MM), CH = dollar(CH))
+
+train %>% 
+  group_by(Purchase) %>% 
+  select(Purchase, SalePriceCH, SalePriceMM, StoreID) %>% 
+  gather(Brand, SellPrice, -Purchase, -StoreID) %>% 
+  ggplot(aes(Purchase, SellPrice, fill = Brand)) +
+    geom_boxplot() +
+    facet_wrap(~StoreID) +
+    labs(title = "Large gap in prices associated with purchase of CH",
+         y = "Selling price of orance juice",
+         x = "Brand of orange juice purchased") +
+    theme(legend.title = element_blank()) +
+    scale_fill_discrete(labels = c("Citrus Hill", "Minute Maid"))
+
 ```
 
 
