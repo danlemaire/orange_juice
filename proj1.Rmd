@@ -120,16 +120,16 @@ train %>%
     geom_bar(stat = "identity", position = "fill") +
     labs(title = "Total Sales of OJ at Each Store")
 
-train %>% 
-  #group_by(WeekofPurchase, StoreID) %>% 
-  #summarise(loyalty = mean(LoyalCH),
-  #          price = mean(PriceCH)) %>% 
-  ggplot() + 
-    geom_smooth(aes(WeekofPurchase, LoyalCH - .5, color = StoreID)) +
-    #geom_line(aes(WeekofPurchase, PriceCH, color = StoreID)) +
-    geom_smooth(aes(WeekofPurchase, PriceDiff, color = StoreID), size = 2) +
-    #geom_line(aes(WeekofPurchase, PriceMM, color = StoreID), size = 2) +
-    facet_wrap(~StoreID)
+# train %>% 
+#   #group_by(WeekofPurchase, StoreID) %>% 
+#   #summarise(loyalty = mean(LoyalCH),
+#   #          price = mean(PriceCH)) %>% 
+#   ggplot() + 
+#     geom_smooth(aes(WeekofPurchase, LoyalCH - .5, color = StoreID)) +
+#     #geom_line(aes(WeekofPurchase, PriceCH, color = StoreID)) +
+#     geom_smooth(aes(WeekofPurchase, PriceDiff, color = StoreID), size = 2) +
+#     #geom_line(aes(WeekofPurchase, PriceMM, color = StoreID), size = 2) +
+#     facet_wrap(~StoreID)
 
 #Difference in Sell Price of OJ at time of Purchase
 train %>% 
@@ -152,13 +152,38 @@ train %>%
     theme(legend.title = element_blank()) +
     scale_fill_discrete(labels = c("Citrus Hill", "Minute Maid"))
 
-
+#Looking at correlation to decide on further feature removal
 library(car)
-glm(Purchase ~ . - MonthofPurchase, train, family = "binomial") %>% alias
+glm(Purchase ~ ., train, family = "binomial") %>% vif
 
 
-glm(Purchase ~ PriceDiff + ListPriceDiff + SalePriceMM + SalePriceCH, train, family = "binomial")
-glm(Purchase ~ SalePriceMM + SalePriceCH, train, family = "binomial")
+#Keep Week, Month or Both?
+week_or_month <- list(week = train(factor(Purchase, labels = c("MM", "CH")) ~ WeekofPurchase, 
+                                   method = "glm", train, family = "binomial", metric = "ROC", 
+                                   trControl = trainControl(classProbs = TRUE, summaryFunction = twoClassSummary)),
+month = train(factor(Purchase, labels = c("MM", "CH")) ~ MonthofPurchase, method = "glm", train, family = "binomial", 
+              metric = "ROC", trControl = trainControl(classProbs = TRUE, summaryFunction = twoClassSummary)),
+week_month = train(factor(Purchase, labels = c("MM", "CH")) ~ WeekofPurchase + MonthofPurchase, 
+                   method = "glm", train, family = "binomial", metric = "ROC", 
+                   trControl = trainControl(classProbs = TRUE, summaryFunction = twoClassSummary))
+                      ) %>% resamples
+
+week_or_month$values %>% 
+  summarise_all(mean) %>% 
+  select(`week~ROC`, `month~ROC`, `week_month~ROC`) %>% 
+  gather(model, performance) %>% 
+  ggplot(aes(model, performance)) + geom_bar(stat = "identity")
+
+#Test whether to factor or keep numeric the date variables
+glm(Purchase ~ . - MonthofPurchase + factor(MonthofPurchase), train, family = "binomial")
+glm(Purchase ~ ., train, family = "binomial")
+glm(Purchase ~ . - WeekofPurchase + factor(WeekofPurchase), train, family = "binomial")
+glm(Purchase ~ ., train, family = "binomial")
+
+
+
+
+
 
 ```
 

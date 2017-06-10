@@ -1,0 +1,134 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r Load and Prepare Data, message=FALSE, warning=FALSE, include=FALSE}
+
+library(magrittr)
+library(tidyverse)
+library(caret)
+library(broom)
+library(ROCR)
+library(h2o)
+library(scales)
+library(corrplot)
+library(GGally)
+library(stringr)
+
+#Set seed now before training split, and again before training each model to compare with others
+set.seed(444)
+
+#Load data, remove variables that are linear or highly correlated per vif and cor
+df <- read_csv("oj.csv") %>% 
+  #map_at(c("Purchase", "Store7", "STORE", "StoreID"), as.factor) %>% 
+  as_tibble %>% 
+  mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase) + 1,
+         MonthofPurchase = ceiling(WeekofPurchase/(52/12)),
+         Purchase = factor(Purchase, levels = c("MM", "CH"), labels = c("MinuteMaid", "CitrusHill")),
+         StoreID = factor(StoreID, labels = c("Store1", "Store2", "Store3", "Store4", "Store7"))
+         ) %>% 
+  select(-STORE, -Store7, -PctDiscMM, -PctDiscCH, -PriceDiff, -ListPriceDiff, -DiscMM, -DiscCH)
+
+#Build train and test set 
+df <- df[!duplicated(df),] #Found some duplicates in rows
+train <- df %>% sample_frac(.8)
+test  <- df %>% setdiff(train)
+
+```
+
+
+
+
+
+```{r Build h2o models, message=FALSE, warning=FALSE, include=FALSE}
+
+#Initiate h2o cluster
+h2o.init(nthreads = -1)
+
+#Split data
+set.seed(444)
+h2o_train <- as.h2o(train)
+h2o_test <- as.h2o(test)
+train_x <- setdiff(colnames(h2o_train), "Purchase")
+train_y <- "Purchase"
+
+#Build default GLM model
+set.seed(444)
+default_glm <- h2o.glm(y = train_y, 
+                  x = train_x, 
+                  training_frame = h2o_train,
+                  family = "binomial",
+                  nfolds = 10,
+                  model_id = "default_glm"
+                  )
+h2o.performance(default_glm, h2o_test)@metrics$AUC
+
+
+#Bootstrap performance of default glm model on test set
+default_glm_performance <- c()
+for (i in 1:100) {
+  default_glm_performance[i] <- h2o_test %>% 
+    as_data_frame %>% 
+    sample_frac(1, replace = T) %>% 
+    as.h2o %>% 
+    h2o.performance(default_glm, .) %>% 
+    h2o.auc
+}
+
+
+#Testing alphas for tuned glm model
+tuned_glm <- h2o.grid("glm", 
+                      grid_id = "tuned_glm", 
+                      hyper_params = list(alpha = c(seq(0,1,.1), .01)), 
+                      x = train_x, 
+                      y = train_y, 
+                      training_frame = h2o_train,
+                      family = "binomial", 
+                      lambda_search = TRUE, 
+                      stopping_metric = "AUC", 
+                      stopping_tolerance = 0, 
+                      stopping_rounds = 4, 
+                      max_iterations = 100
+                      )
+
+#Impact of alpha on tuned glm model: best alpha is 0 (pure ridge, no lasso)
+tuned_glm@summary_table %>% 
+  as_data_frame %>% 
+  mutate(alpha = (str_replace(.$alpha, ".", "") %>% str_replace(".$", "") %>% as.numeric)) %>% 
+  arrange(alpha) %>% 
+  ggplot(aes(alpha, logloss)) + 
+    geom_point() +
+    labs(title = "Best alpha is 0",
+         subtitle = "(Even though performance generally improves with higher alpha)",
+         y = "Performance of model (lower is better)") +
+    theme(axis.text.y = element_blank(),
+          axis.ticks.y = element_blank())
+
+best_tuned_glm <- h2o.getModel("tuned_glm_model_0")
+
+#Bootstrap performance of tuned glm model on test data
+tuned_glm_performance <- c()
+for (i in 1:100) {
+  tuned_glm_performance[i] <- h2o_test %>% 
+    as_data_frame %>% 
+    sample_frac(1, replace = T) %>% 
+    as.h2o %>% 
+    h2o.performance(best_tuned_glm, .) %>% 
+    h2o.auc
+}
+
+
+ggplot() + 
+    geom_density(aes(x = tuned_glm_performance), fill = "red", alpha = .25) +
+    geom_vline(xintercept = median(tuned_glm_performance), color = "red") +
+    geom_text(aes(label = round(median(tuned_glm_performance), 4)), 
+              y = 5, x = median(tuned_glm_performance)) +
+    geom_density(aes(x = default_glm_performance), fill = "blue", alpha = .25) +
+    geom_vline(xintercept = median(default_glm_performance), color = "blue") +
+    geom_text(aes(label = round(median(default_glm_performance), 4)), 
+              y = 5, x = median(default_glm_performance))
+
+
+```
+
