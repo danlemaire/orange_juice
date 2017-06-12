@@ -5,16 +5,9 @@ output: html_notebook
 
 ```{r Load and Prepare Data, message=FALSE, warning=FALSE, include=FALSE}
 
-library(magrittr)
-library(tidyverse)
-library(caret)
-library(broom)
-library(ROCR)
-library(h2o)
-library(scales)
-library(corrplot)
-library(GGally)
-library(stringr)
+#Load necessary packages
+packages <- list("magrittr", "tidyverse", "caret", "broom", "h2o", "scales", "corrplot", "GGally", "stringr", "Boruta")
+lapply(packages, require, character.only = T)
 
 #Set seed now before training split, and again before training each model to compare with others
 set.seed(444)
@@ -37,8 +30,37 @@ test  <- df %>% setdiff(train)
 
 ```
 
+```{r}
+df_boruta <- read_csv("oj.csv") %>% 
+  as_tibble %>% 
+  mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase) + 1,
+         MonthofPurchase = ceiling(WeekofPurchase/(52/12)),
+         Purchase = factor(Purchase, levels = c("MM", "CH"), labels = c("MinuteMaid", "CitrusHill")),
+         #StoreID = factor(StoreID, labels = c("Store1", "Store2", "Store3", "Store4", "Store7")),
+         Store_7 = Store7,
+         Store1 = ifelse(StoreID == 1, 1, 0),
+         Store2 = ifelse(StoreID == 2, 1, 0),
+         Store3 = ifelse(StoreID == 3, 1, 0),
+         Store4 = ifelse(StoreID == 4, 1, 0),
+         Store7 = ifelse(StoreID == 7, 1, 0)
+         )
 
+boruta.train <- Boruta(Purchase ~ ., data = df_boruta, doTrace = 2, pValue = .05)
+#plot(boruta.train)
+boruta.train$ImpHistory %>% 
+  as_tibble %>% 
+  gather(key, value) %>% 
+  ggplot(aes(x = reorder(key, value), y = value, group = key)) + 
+    stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = .5) +
+    #geom_boxplot() +
+    labs(title = "Which variables are most important?",
+         x = element_blank(),
+         y = "Variable importance") +
+    coord_flip() +
+    theme(axis.text.x = element_text(angle = 90),
+          legend.position = "none")
 
+```
 
 
 ```{r Build h2o models, message=FALSE, warning=FALSE, include=FALSE}
@@ -60,10 +82,12 @@ default_glm <- h2o.glm(y = train_y,
                   training_frame = h2o_train,
                   family = "binomial",
                   nfolds = 10,
-                  model_id = "default_glm"
+                  model_id = "default_glm", 
+                  fold_assignment = "Modulo", 
+                  keep_cross_validation_predictions = T,
+                  lambda = 0,
+                  compute_p_values = T
                   )
-h2o.performance(default_glm, h2o_test)@metrics$AUC
-
 
 #Bootstrap performance of default glm model on test set
 default_glm_performance <- c()
@@ -77,7 +101,7 @@ for (i in 1:100) {
 }
 
 
-#Testing alphas for tuned glm model
+#Test alphas for tuned glm model
 tuned_glm <- h2o.grid("glm", 
                       grid_id = "tuned_glm", 
                       hyper_params = list(alpha = c(seq(0,1,.1), .01)), 
@@ -86,10 +110,10 @@ tuned_glm <- h2o.grid("glm",
                       training_frame = h2o_train,
                       family = "binomial", 
                       lambda_search = TRUE, 
+                      max_iterations = 100, 
                       stopping_metric = "AUC", 
-                      stopping_tolerance = 0, 
-                      stopping_rounds = 4, 
-                      max_iterations = 100
+                      stopping_tolerance = 0.00001, 
+                      stopping_rounds = 4
                       )
 
 #Impact of alpha on tuned glm model: best alpha is 0 (pure ridge, no lasso)
@@ -107,6 +131,14 @@ tuned_glm@summary_table %>%
 
 best_tuned_glm <- h2o.getModel("tuned_glm_model_0")
 
+
+#Compare model performance on train and test sets for tuned and default model
+default_glm %>% h2o.performance(h2o_test) %>% h2o.confusionMatrix
+best_tuned_glm %>% h2o.performance(h2o_test) %>% h2o.confusionMatrix
+default_glm %>% h2o.confusionMatrix
+best_tuned_glm %>% h2o.confusionMatrix
+
+
 #Bootstrap performance of tuned glm model on test data
 tuned_glm_performance <- c()
 for (i in 1:100) {
@@ -118,16 +150,495 @@ for (i in 1:100) {
     h2o.auc
 }
 
+# Visualize difference in performance on test sets between default and tuned glm models
+# ggplot() + 
+#     geom_density(aes(x = tuned_glm_performance), fill = "red", alpha = .25) +
+#     geom_vline(xintercept = median(tuned_glm_performance), color = "red") +
+#     geom_text(aes(label = round(median(tuned_glm_performance), 4)), 
+#               y = 5, x = median(tuned_glm_performance)) +
+#     geom_density(aes(x = default_glm_performance), fill = "blue", alpha = .25) +
+#     geom_vline(xintercept = median(default_glm_performance), color = "blue") +
+#     geom_text(aes(label = round(median(default_glm_performance), 4)), 
+#               y = 5, x = median(default_glm_performance))
 
-ggplot() + 
-    geom_density(aes(x = tuned_glm_performance), fill = "red", alpha = .25) +
-    geom_vline(xintercept = median(tuned_glm_performance), color = "red") +
-    geom_text(aes(label = round(median(tuned_glm_performance), 4)), 
-              y = 5, x = median(tuned_glm_performance)) +
-    geom_density(aes(x = default_glm_performance), fill = "blue", alpha = .25) +
-    geom_vline(xintercept = median(default_glm_performance), color = "blue") +
-    geom_text(aes(label = round(median(default_glm_performance), 4)), 
-              y = 5, x = median(default_glm_performance))
+
+#Build stacked ensemble of models
+rf <- h2o.randomForest(train_x, train_y, h2o_train, model_id = "rf_default", 
+                       nfolds = 10, fold_assignment = "Modulo", keep_cross_validation_predictions = T) 
+gbm <- h2o.gbm(train_x, train_y, h2o_train, model_id = "gbm_default", 
+                nfolds = 10, fold_assignment = "Modulo", keep_cross_validation_predictions = T) 
+dl <- h2o.deeplearning(train_x, train_y, h2o_train, model_id = "dl_default", 
+                        nfolds = 10, fold_assignment = "Modulo", keep_cross_validation_predictions = T) 
+
+stacked <- h2o.stackedEnsemble(train_x, train_y, h2o_train, 
+                    base_models = list("default_glm", "gbm_default", "dl_default"), 
+                    selection_strategy = "choose_all")
+
+h2o.performance(stacked, h2o_test) %>% h2o.auc
+h2o.performance(default_glm, h2o_test) %>% h2o.auc
+h2o.performance(dl, h2o_test) %>% h2o.auc
+h2o.performance(rf, h2o_test) %>% h2o.auc
+h2o.performance(gbm, h2o_test) %>% h2o.auc
+
+#Tune GBM for possible improvements
+gbm_tuned <- h2o.gbm(train_x, train_y, h2o_train, model_id = "gbm_tuned", 
+        nfolds = 10, fold_assignment = "Modulo", keep_cross_validation_predictions = T, 
+        stopping_metric = "AUC", stopping_tolerance = 0, stopping_rounds = 4, 
+        score_tree_interval = 5, ntrees = 500, learn_rate = .01, balance_classes = T, 
+        col_sample_rate = .9, col_sample_rate_per_tree = .9, sample_rate = .8) 
+
+gbm_tuned %>% h2o.performance(h2o_test) %>% h2o.auc
+
+
+#Tune GBM on grid
+tuned_gbm <- h2o.grid("gbm", 
+                      grid_id = "tuned_gbm", 
+                      hyper_params = list(max_depth = c(5, 12, 40),
+                                          min_rows = c(2, 10, 40),
+                                          col_sample_rate = c(.8, .9), 
+                                          col_sample_rate_per_tree = c(.8, .9), 
+                                          sample_rate = c(.8, .9)), 
+                      x = train_x, 
+                      y = train_y, 
+                      training_frame = h2o_train, 
+                      nfolds = 10, 
+                      fold_assignment = "Modulo", 
+                      keep_cross_validation_predictions = T, 
+                      stopping_metric = "AUC", 
+                      stopping_tolerance = 0, 
+                      stopping_rounds = 4, 
+                      score_tree_interval = 5, 
+                      ntrees = 500, 
+                      learn_rate = .01, 
+                      balance_classes = T
+                      )
+
+best_tuned_gbm <- tuned_gbm@summary_table %>% 
+  as_tibble %>% 
+  arrange(logloss) %>% 
+  select(model_ids) %>% 
+  slice(1) %>% 
+  as.character %>% 
+  h2o.getModel(.)
+
+best_tuned_gbm %>% h2o.performance(h2o_test) %>% h2o.auc
+
+
+
+
+
+stacked_model_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  stacked_model_results[i] <- ((boot %>% as.h2o %>% h2o.predict(stacked, .))$MinuteMaid %>% as_tibble %>% 
+  prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+default_glm_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  default_glm_results[i] <- ((boot %>% as.h2o %>% h2o.predict(stacked, .))$MinuteMaid %>% as_tibble %>% 
+  prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+dl_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  dl_results[i] <- ((boot %>% as.h2o %>% h2o.predict(stacked, .))$MinuteMaid %>% as_tibble %>% 
+  prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+rf_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  rf_results[i] <- ((boot %>% as.h2o %>% h2o.predict(stacked, .))$MinuteMaid %>% as_tibble %>% 
+  prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+gbm_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  gbm_results[i] <- ((boot %>% as.h2o %>% h2o.predict(stacked, .))$MinuteMaid %>% as_tibble %>% 
+  prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+final_test_results <- data_frame(model = "Logistic", 
+                                 ymin = default_glm_results %>% 
+                                   median - qt(0.975, df = length(default_glm_results) - 1) * 
+                                   sd(default_glm_results)/sqrt(length(default_glm_results)), 
+                                 y = default_glm_results %>% 
+                                   median, 
+                                 ymax = default_glm_results %>% 
+                                   median + qt(0.975, df = length(default_glm_results) - 1) * 
+                                   sd(default_glm_results)/sqrt(length(default_glm_results))
+                                 ) %>% 
+                      bind_rows(data_frame(model = "Deep Learning", 
+                                 ymin = dl_results %>% 
+                                   median - qt(0.975, df = length(dl_results) - 1) * 
+                                   sd(dl_results)/sqrt(length(dl_results)), 
+                                 y = dl_results %>% 
+                                   median, 
+                                 ymax = dl_results %>% 
+                                   median + qt(0.975, df = length(dl_results) - 1) * 
+                                   sd(dl_results)/sqrt(length(dl_results))
+                                 )) %>% 
+                      bind_rows(data_frame(model = "Random Forest", 
+                                 ymin = rf_results %>% 
+                                   median - qt(0.975, df = length(rf_results) - 1) * 
+                                   sd(rf_results)/sqrt(length(rf_results)), 
+                                 y = rf_results %>% 
+                                   median, 
+                                 ymax = rf_results %>% 
+                                   median + qt(0.975, df = length(rf_results) - 1) * 
+                                   sd(rf_results)/sqrt(length(rf_results))
+                                 )) %>% 
+                      bind_rows(data_frame(model = "Gradient Boosted Machine", 
+                                 ymin = gbm_results %>% 
+                                   median - qt(0.975, df = length(gbm_results) - 1) * 
+                                   sd(gbm_results)/sqrt(length(gbm_results)), 
+                                 y = gbm_results %>% 
+                                   median, 
+                                 ymax = gbm_results %>% 
+                                   median + qt(0.975, df = length(gbm_results) - 1) * 
+                                   sd(gbm_results)/sqrt(length(gbm_results))
+                                 )) %>% 
+                      bind_rows(data_frame(model = "Stacked Ensemble", 
+                                 ymin = stacked_model_results %>% 
+                                   median - qt(0.975, df = length(stacked_model_results) - 1) * 
+                                   sd(stacked_model_results)/sqrt(length(stacked_model_results)), 
+                                 y = stacked_model_results %>% 
+                                   median, 
+                                 ymax = stacked_model_results %>% 
+                                   median + qt(0.975, df = length(stacked_model_results) - 1) * 
+                                   sd(stacked_model_results)/sqrt(length(stacked_model_results))
+                                 ))
+
+
+
+```
+
+```{r Build svm model in caret}
+
+# Build SVM model with svmRadial kernel and see performance results
+set.seed(444)
+svm_radial_model <- train(Purchase ~ ., 
+                 data = train, 
+                 method = 'svmRadial',  
+                 trControl = trainControl(method = "cv",
+                                         number = 10,
+                                         summaryFunction = twoClassSummary,
+                                         classProbs = TRUE,
+                                         returnResamp = "all"
+                                         ),
+                 preProc = c("center","scale"),
+                 metric = "ROC",
+                 verbose = FALSE,
+                 probability = TRUE,
+                 tuneGrid = expand.grid(sigma = .016, C = 1.95)
+                 )
+
+svm_radial_model_results <- c()
+for (i in 1:100) {
+  idx <- sample_frac(test, 1, replace = T)
+  svm_radial_model_results[i] <- (predict(svm_radial_model, idx, type = "prob") %>% 
+    select(MinuteMaid) %>% 
+    prediction(idx$Purchase) %>% 
+    performance("auc"))@y.values[[1]][1]
+}
+
+# Build SVM model with gaussprRadial kernel and see performance results
+set.seed(444)
+svm_gaussprRadial_model <- train(Purchase ~ ., 
+                                 data = train, 
+                                 method = "gaussprRadial",  
+                                 trControl = trainControl(method = "cv",
+                                                         number = 10,
+                                                         summaryFunction = twoClassSummary,
+                                                         classProbs = TRUE,
+                                                         returnResamp = "all"
+                                                         ),
+                                 preProc = c("center","scale"),
+                                 metric = "ROC",
+                                 verbose = FALSE,
+                                 probability = TRUE,
+                                 tuneGrid = expand.grid(sigma = .0255556)
+                                 )
+
+svm_gaussprRadial_model_results <- c()
+for (i in 1:100) {
+  idx <- sample_frac(test, 1, replace = T)
+  svm_gaussprRadial_model_results[i] <- (predict(svm_gaussprRadial_model, idx, type = "prob") %>% 
+    select(MinuteMaid) %>% 
+    prediction(idx$Purchase) %>% 
+    performance("auc"))@y.values[[1]][1]
+}
+
+final_test_results %<>% 
+                  bind_rows(data_frame(model = "svmRadial Kernel", 
+                                 ymin = svm_radial_model_results %>% 
+                                   median - qt(0.975, df = length(svm_radial_model_results) - 1) * 
+                                   sd(svm_radial_model_results)/sqrt(length(svm_radial_model_results)), 
+                                 y = svm_radial_model_results %>% 
+                                   median, 
+                                 ymax = svm_radial_model_results %>% 
+                                   median + qt(0.975, df = length(svm_radial_model_results) - 1) * 
+                                   sd(svm_radial_model_results)/sqrt(length(svm_radial_model_results))
+                                 )) %>% 
+                  bind_rows(data_frame(model = "gaussprRadial Kernel", 
+                                 ymin = svm_gaussprRadial_model_results %>% 
+                                   median - qt(0.975, df = length(svm_gaussprRadial_model_results) - 1) * 
+                                   sd(svm_gaussprRadial_model_results)/sqrt(length(svm_gaussprRadial_model_results)), 
+                                 y = svm_gaussprRadial_model_results %>% 
+                                   median, 
+                                 ymax = svm_gaussprRadial_model_results %>% 
+                                   median + qt(0.975, df = length(svm_gaussprRadial_model_results) - 1) * 
+                                   sd(svm_gaussprRadial_model_results)/sqrt(length(svm_gaussprRadial_model_results))
+                                 ))
+
+```
+
+
+
+```{r}
+final_test_results <- bind_cols(final_test_results, data_frame(runtime = c(default_glm@model$run_time, dl@model$run_time, rf@model$run_time, gbm@model$run_time, stacked@model$run_time, svm_radial_model$times$everything[3] * 60, svm_gaussprRadial_model$times$everything[3] * 60)))
+
+final_test_results %>% 
+  mutate(isWinner = ifelse(y == max(y), 1, 0) %>% factor,
+         runtime = paste0(round(runtime), " secs")) %>% 
+  ggplot(aes(reorder(model, y), ymin = ymin, ymax = ymax, y = y, label = runtime)) +
+    geom_bar(aes(alpha = isWinner), stat = "identity") +
+    geom_text(y = .89, size = 3) +
+    geom_errorbar(color = "red", width = .4) +
+    coord_flip(ylim = c(.8, .9)) +
+    labs(title = "Detail view of differences in performance of models",
+         y = "AUC performance of model on bootstrap of holdout data",
+         x = element_blank()) +
+    theme(panel.background = element_blank(),
+          legend.position = "none") +
+    scale_alpha_discrete(range = c(.4,1))
+
+
+
+```
+
+# Overview
+
+The goal of this analysis is to understand how to make the Orange Juice category of store sales perform better.  The store sells two brands of orange juice, Minute Maid (MM) and Citrus Hill (CH).  Since MM has higher margins than CH, this analysis will make recommendations regarding which factors influence a consumer's decision to purchase MM orange juice.  This allows our compaqny to leverage those factors as opportunities to influence MM sales.  It will additionally provide a predictive model for more precise forecasting.  This forecasting will be of benefit now, but will be of tremendous benefit later when the company adjusts its marketing to increase MM sales (since an updated forecast will be required).
+
+
+# Problem Definition
+
+Brand manager
+1. What predictor variables influence the sales of MM?
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Plot variable importances using standardized coefficients from glm
+default_glm@model$coefficients_table %>% 
+  as_tibble %>% 
+  mutate(sign = factor(ifelse(standardized_coefficients >= 0, 1, 0)),
+         significant = (ifelse(p_value <= .05, 1, 0) %>% factor)) %>%
+  filter(!is.na(p_value)) %>% 
+  ggplot(aes(x = reorder(names, abs(standardized_coefficients)), 
+             y = abs(standardized_coefficients), 
+             fill = sign,
+             alpha = significant)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(title = "Brand loyalty and discounts matter most, and these change over time",
+         y = "Influence of each factor on a customer's decision to purchase Minute Maid",
+         x = element_blank()) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.ticks.y = element_blank(),
+          legend.position = c(.75, 0.15),
+          legend.title = element_blank(),
+          panel.background = element_blank()
+          ) +
+    scale_fill_discrete(breaks = c(1, 0),
+                        labels = c("MORE Likely to buy Minute Maid", "LESS likely to buy Minute Maid")
+                        ) +
+    scale_alpha_discrete(guide = "none", range = c(.15, 1))
+  
+```
+
+2. Are all the variables in the dataset effective or are some more effective than
+others?
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Plot significance of each standardized coefficient using glm model
+default_glm@model$coefficients_table %>% 
+  as_tibble %>% 
+  transmute(names = names,
+            p_value = p_value,
+            significant = (ifelse(p_value <= .05, 1, 0) %>% factor),
+            removed = ifelse(is.na(p_value), 1, 0)) %>% 
+  filter(!is.na(significant)) %>% 
+  ggplot(aes(reorder(names, -abs(p_value)), 
+             1 - p_value, 
+             fill = significant, 
+             alpha = significant,
+             label = round(p_value, 2))) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(title = "Only a few factors in the model are statistically significant",
+         y = "Statistical confidence that this result did not happen by chance",
+         x = element_blank()) +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.ticks.y = element_blank(),
+          legend.position = c(.75, 0.15),
+          legend.title = element_blank(),
+          panel.background = element_blank()
+          ) +
+    geom_text(nudge_y = -.025, size = 3) +
+    scale_fill_discrete(breaks = c(01,0), labels = c("Statistically significant", "Not statistically significant")) +
+    scale_alpha_discrete(guide = "none", range = c(.35, 1))
+```
+
+
+3. How confident are you in your recommendations?
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+
+
+train %>% 
+  select(Purchase, StoreID, LoyalCH) %>% 
+  group_by(StoreID) %>% 
+  ggplot(aes(StoreID, LoyalCH, fill = Purchase)) + 
+    geom_boxplot()
+
+train %>% 
+  select(Purchase, PriceMM, PriceCH, WeekofPurchase, StoreID) %>% 
+  mutate(PriceDiff = PriceMM - PriceCH,
+         is_mm = Purchase == "MinuteMaid") %>% 
+  group_by(PriceMM, PriceCH, StoreID) %>% 
+  summarise(Purchase = mean(is_mm),
+            sales = n()) %>% 
+  ggplot(aes(PriceMM, PriceCH, color = Purchase, size = sales)) + 
+    geom_point() +
+    facet_wrap(~StoreID)
+
+train %>% 
+  select(WeekofPurchase, PriceCH, PriceMM, StoreID) %>% 
+  gather(brand, price, -WeekofPurchase, -StoreID) %>% 
+  group_by(WeekofPurchase, brand, StoreID) %>% 
+  summarise(price = mean(price),
+            purchases = n()) %>% 
+  ggplot(aes(price, purchases, color = brand)) + 
+    geom_point() +
+    #geom_smooth(method = "lm") +
+    facet_wrap(~StoreID) +
+    labs(title = "Higher price is correlated with more quantity purchased",
+         subtitle = "...but only in Store7.  Why store7? Why is the correlation positive?",
+         x = "Price",
+         y = "Number of weekly purchases",
+         color = "Brand") +
+    scale_x_continuous(labels = dollar) +
+    scale_color_discrete(labels = c("Citrus Hill", "Minute Maid")) +
+    theme(legend.position = c(.85, .25),
+          panel.background = element_blank()) +
+    stat_summary(fun.data = mean_cl_boot, geom = "ribbon", alpha = 0.25)
+
+
+
+```
+
+
+4. Based on your analysis what are specific recommendations you have for the
+brand manager?
+
+```{r, message=FALSE, warning=FALSE}
+#Create dataframe with means for all values, grouped by store, and a grid of possible prices for each brand of oj
+sens_analysis_df <- train %>% 
+  group_by(StoreID) %>% 
+  summarise_all(mean) %>% 
+  slice(rep(1:n(), each = 50)) %>% 
+  mutate(PriceCH2 = rep(c(seq(1, 3, length = 25), rep(NA, 25)), 5),
+         PriceCH = ifelse(is.na(PriceCH2), PriceCH, PriceCH2),
+         PriceMM2 = rep(c(rep(NA, 25), seq(1, 3, length = 25)), 5),
+         PriceMM = ifelse(is.na(PriceMM2), PriceMM, PriceMM2)
+         ) %>% 
+  select(-Purchase) %>% 
+  h2o.predict(h2o_glm, as.h2o(sens_analysis_df)) %>% 
+  as_tibble %>% 
+  bind_cols(sens_analysis_df) %>% 
+  mutate(StoreID = factor(StoreID, 
+                          labels = c("Store #1", "Store #2", "Store #3", "Store #4", "Store #7"))) %>% 
+  ggplot() +
+    geom_line(aes(PriceCH2, CH, color = "blue")) +
+    #geom_smooth(aes(PriceCH2, CH)) +
+    geom_line(aes(PriceMM2, MM, color = "orange")) +
+    #geom_smooth(aes(PriceMM2, MM)) +
+    facet_grid(StoreID~.) +
+    #geom_hline(yintercept = .5) +
+    scale_y_continuous(labels = percent, breaks = c(.5, 1)) +
+    labs(title = "Pricing opportunities per store",
+         x = "Selling Price of Orange Juice",
+         y = "Probability of Purchasing Each Brand")
+
+
+
+sens_analysis_df2 <- train %>% 
+  group_by(StoreID) %>% 
+  summarise_all(mean) %>% 
+  slice(rep(1:n(), each = 50)) %>% 
+  mutate(PriceCH = rep(seq(1, 3, length = 25), 10),
+         PriceMM = sort(rep(seq(1, 3, length = 25), 10))
+         ) %>% 
+  select(-Purchase)
+
+
+h2o.predict(h2o_glm, as.h2o(sens_analysis_df2)) %>% 
+  as_tibble %>% 
+  mutate_at(2:4, round, digits = 3) %>% 
+  mutate(MM = ifelse(MM > .5,1,0)) %>% 
+  bind_cols(sens_analysis_df2) %>% 
+  select(PriceCH, PriceMM, MM) %>% 
+  ggplot(aes(PriceCH, PriceMM, color = factor(MM))) +
+    geom_point()
+
+
+
+```
+
+
+
+
+
+Sales manager
+1. Can you provide him a predictive model that can tell him the probability of
+customers buying MM?
+2. How good is the model in its predictions?
+3. How confident are you in your recommendations?
+
+
+
+# Methods
+
+
+
+# Results
+
+
+
+# Recommendations
+
+
+
+
+
+
+
+```{r}
+
+table(df$Purchase, df$StoreID) %>% 
+  as_tibble %>% 
+  ggplot(aes(Var2, n, fill = Var1)) + 
+    geom_bar(stat = "identity", position = "fill")
 
 
 ```
