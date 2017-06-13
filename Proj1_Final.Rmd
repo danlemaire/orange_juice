@@ -431,7 +431,7 @@ final_test_results %>%
          runtime = paste0(round(runtime), " secs")) %>% 
   ggplot(aes(reorder(model, y), ymin = ymin, ymax = ymax, y = y, label = runtime)) +
     geom_bar(aes(alpha = isWinner), stat = "identity") +
-    geom_text(y = .89, size = 3) +
+    geom_text(y = .90, size = 3) +
     geom_errorbar(color = "red", width = .4) +
     coord_flip(ylim = c(.8, .9)) +
     labs(title = "Detail view of differences in performance of models",
