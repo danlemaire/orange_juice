@@ -6,7 +6,7 @@ output: html_notebook
 ```{r Load and Prepare Data, message=FALSE, warning=FALSE, include=FALSE}
 
 #Load necessary packages
-packages <- list("magrittr", "tidyverse", "caret", "broom", "h2o", "scales", "corrplot", "GGally", "stringr", "Boruta")
+packages <- list("magrittr", "tidyverse", "caret", "broom", "h2o", "scales", "corrplot", "GGally", "stringr", "Boruta", "ROCR")
 lapply(packages, require, character.only = T)
 
 #Set seed now before training split, and again before training each model to compare with others
@@ -328,7 +328,7 @@ svm_radial_model <- train(Purchase ~ .,
                                          number = 10,
                                          summaryFunction = twoClassSummary,
                                          classProbs = TRUE,
-                                         returnResamp = "all"
+                                         returnResamp = "final"
                                          ),
                  preProc = c("center","scale"),
                  metric = "ROC",
@@ -355,7 +355,7 @@ svm_gaussprRadial_model <- train(Purchase ~ .,
                                                          number = 10,
                                                          summaryFunction = twoClassSummary,
                                                          classProbs = TRUE,
-                                                         returnResamp = "all"
+                                                         returnResamp = "final"
                                                          ),
                                  preProc = c("center","scale"),
                                  metric = "ROC",
@@ -394,6 +394,16 @@ final_test_results %<>%
                                    median + qt(0.975, df = length(svm_gaussprRadial_model_results) - 1) * 
                                    sd(svm_gaussprRadial_model_results)/sqrt(length(svm_gaussprRadial_model_results))
                                  ))
+
+
+
+list(svm_gaussprRadial_model, svm_radial_model) %>% 
+  resamples %>% 
+  summary
+
+list(svm_gaussprRadial_model, svm_radial_model) %>% 
+  resamples %>% 
+  bwplot(metric="ROC", ylab = c("gaussian kernel", "radial kernel"))
 
 ```
 
