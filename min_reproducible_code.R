@@ -1,0 +1,482 @@
+
+#Load necessary packages
+packages <- list("magrittr", "tidyverse", "caret", "broom", "h2o", "scales", "corrplot", "GGally", "stringr", "Boruta", "ROCR", "kernlab")
+lapply(packages, require, character.only = T)
+
+#Set seed now before training split, and again before training each model to compare with others
+set.seed(444)
+
+#Load data, remove variables that are linear or highly correlated per vif and cor
+df <- read_csv("oj.csv") %>% 
+  #map_at(c("Purchase", "Store7", "STORE", "StoreID"), as.factor) %>% 
+  as_tibble %>% 
+  mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase) + 1,
+         MonthofPurchase = ceiling(WeekofPurchase/(52/12)),
+         Purchase = factor(Purchase, levels = c("MM", "CH"), labels = c("MinuteMaid", "CitrusHill")),
+         StoreID = factor(StoreID, labels = c("Store1", "Store2", "Store3", "Store4", "Store7"))
+  ) %>% 
+  select(-STORE, -Store7, -PctDiscMM, -PctDiscCH, -PriceDiff, -ListPriceDiff, -DiscMM, -DiscCH)
+
+#Build train and test set 
+df <- df[!duplicated(df),] #Found some duplicates in rows
+train <- df %>% sample_frac(.8)
+test  <- df %>% setdiff(train)
+
+#Remove variables athat are linear combinations of other variables
+#train %>% findLinearCombos
+
+#Use Boruta to find variable importances independent of collinearity
+df_boruta <- read_csv("oj.csv") %>% 
+  as_tibble %>% 
+  mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase) + 1,
+         MonthofPurchase = ceiling(WeekofPurchase/(52/12)),
+         Purchase = factor(Purchase, levels = c("MM", "CH"), labels = c("MinuteMaid", "CitrusHill")),
+         #StoreID = factor(StoreID, labels = c("Store1", "Store2", "Store3", "Store4", "Store7")),
+         Store_7 = Store7,
+         Store1 = ifelse(StoreID == 1, 1, 0),
+         Store2 = ifelse(StoreID == 2, 1, 0),
+         Store3 = ifelse(StoreID == 3, 1, 0),
+         Store4 = ifelse(StoreID == 4, 1, 0),
+         Store7 = ifelse(StoreID == 7, 1, 0)
+  )
+
+boruta.train <- Boruta(Purchase ~ ., data = df_boruta, doTrace = 2, pValue = .05)
+#plot(boruta.train)
+boruta.train$ImpHistory %>% 
+  as_tibble %>% 
+  gather(key, value) %>% 
+  ggplot(aes(x = reorder(key, value), y = value, group = key)) + 
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = .5) +
+  #geom_boxplot() +
+  labs(title = "Which variables are most important?",
+       x = element_blank(),
+       y = "Variable Importance") +
+  coord_flip() +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "none")
+
+#Initiate h2o cluster
+h2o.init(nthreads = -1)
+
+#Split data
+h2o_train <- as.h2o(train)
+h2o_test <- as.h2o(test)
+train_x <- setdiff(colnames(h2o_train), "Purchase")
+train_y <- "Purchase"
+
+#Build default GLM model
+default_glm <- h2o.glm(y = train_y, 
+                       x = train_x, 
+                       training_frame = h2o_train,
+                       family = "binomial",
+                       nfolds = 10,
+                       model_id = "default_glm", 
+                       fold_assignment = "Modulo", 
+                       keep_cross_validation_predictions = T,
+                       lambda = 0,
+                       compute_p_values = T,
+                       seed = 444
+)
+
+#Bootstrap performance of default glm model on test set
+default_glm_performance <- c()
+for (i in 1:100) {
+  default_glm_performance[i] <- h2o_test %>% 
+    as_data_frame %>% 
+    sample_frac(1, replace = T) %>% 
+    as.h2o %>% 
+    h2o.performance(default_glm, .) %>% 
+    h2o.auc
+}
+
+#Test alphas for tuned glm model
+tuned_glm <- h2o.grid("glm", 
+                      grid_id = "tuned_glm", 
+                      hyper_params = list(alpha = c(seq(0,1,.1), .01)), 
+                      x = train_x, 
+                      y = train_y, 
+                      training_frame = h2o_train,
+                      family = "binomial", 
+                      lambda_search = TRUE, 
+                      max_iterations = 100, 
+                      stopping_metric = "AUC", 
+                      stopping_tolerance = 0.00001, 
+                      stopping_rounds = 4,
+                      seed = 444
+)
+
+#Impact of alpha on tuned glm model: best alpha is 0 (pure ridge, no lasso)
+tuned_glm@summary_table %>% 
+  as_data_frame %>% 
+  mutate(alpha = (str_replace(.$alpha, ".", "") %>% str_replace(".$", "") %>% as.numeric)) %>% 
+  arrange(alpha) %>% 
+  ggplot(aes(alpha, logloss)) + 
+  geom_point() +
+  labs(title = "Best alpha is 0",
+       subtitle = "(Even though performance generally improves with higher alpha)",
+       y = "Performance of model (lower is better)") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+best_tuned_glm <- h2o.getModel("tuned_glm_model_0")
+
+#Compare model performance on train and test sets for tuned and default model
+default_glm %>% h2o.performance(h2o_test) %>% h2o.confusionMatrix
+best_tuned_glm %>% h2o.performance(h2o_test) %>% h2o.confusionMatrix
+default_glm %>% h2o.confusionMatrix
+best_tuned_glm %>% h2o.confusionMatrix
+
+#Bootstrap performance of tuned glm model on test data
+tuned_glm_performance <- c()
+for (i in 1:100) {
+  tuned_glm_performance[i] <- h2o_test %>% 
+    as_data_frame %>% 
+    sample_frac(1, replace = T) %>% 
+    as.h2o %>% 
+    h2o.performance(best_tuned_glm, .) %>% 
+    h2o.auc
+}
+
+#Build stacked ensemble of models
+rf <- h2o.randomForest(train_x, train_y, h2o_train, model_id = "rf_default", seed = 444,
+                       nfolds = 10, fold_assignment = "Modulo", keep_cross_validation_predictions = T) 
+gbm <- h2o.gbm(train_x, train_y, h2o_train, model_id = "gbm_default", seed = 444,
+               nfolds = 10, fold_assignment = "Modulo", keep_cross_validation_predictions = T) 
+dl <- h2o.deeplearning(train_x, train_y, h2o_train, model_id = "dl_default", seed = 444,
+                       nfolds = 10, fold_assignment = "Modulo", keep_cross_validation_predictions = T) 
+
+stacked <- h2o.stackedEnsemble(train_x, train_y, h2o_train, 
+                               base_models = list("default_glm", "gbm_default", "dl_default", "rf_default"), 
+                               selection_strategy = "choose_all")
+
+h2o.performance(stacked, h2o_test) %>% h2o.auc
+h2o.performance(default_glm, h2o_test) %>% h2o.auc
+h2o.performance(dl, h2o_test) %>% h2o.auc
+h2o.performance(rf, h2o_test) %>% h2o.auc
+h2o.performance(gbm, h2o_test) %>% h2o.auc
+
+stacked_model_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  stacked_model_results[i] <- ((boot %>% as.h2o %>% h2o.predict(stacked, .))$MinuteMaid %>% as_tibble %>% 
+                                 prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+default_glm_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  default_glm_results[i] <- ((boot %>% as.h2o %>% h2o.predict(default_glm, .))$MinuteMaid %>% as_tibble %>% 
+                               prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+dl_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  dl_results[i] <- ((boot %>% as.h2o %>% h2o.predict(dl, .))$MinuteMaid %>% as_tibble %>% 
+                      prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+rf_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  rf_results[i] <- ((boot %>% as.h2o %>% h2o.predict(rf, .))$MinuteMaid %>% as_tibble %>% 
+                      prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+gbm_results <- c()
+for (i in 1:30) {
+  boot <- h2o_test %>% as_tibble %>% sample_frac(1, replace = T)
+  gbm_results[i] <- ((boot %>% as.h2o %>% h2o.predict(gbm, .))$MinuteMaid %>% as_tibble %>% 
+                       prediction(., labels = boot$Purchase) %>% performance("auc"))@y.values[[1]][1]
+}
+
+final_test_results <- data_frame(model = "Logistic", 
+                                 ymin = default_glm_results %>% 
+                                   median - qt(0.975, df = length(default_glm_results) - 1) * 
+                                   sd(default_glm_results)/sqrt(length(default_glm_results)), 
+                                 y = default_glm_results %>% 
+                                   median, 
+                                 ymax = default_glm_results %>% 
+                                   median + qt(0.975, df = length(default_glm_results) - 1) * 
+                                   sd(default_glm_results)/sqrt(length(default_glm_results))
+) %>% 
+  bind_rows(data_frame(model = "Deep Learning", 
+                       ymin = dl_results %>% 
+                         median - qt(0.975, df = length(dl_results) - 1) * 
+                         sd(dl_results)/sqrt(length(dl_results)), 
+                       y = dl_results %>% 
+                         median, 
+                       ymax = dl_results %>% 
+                         median + qt(0.975, df = length(dl_results) - 1) * 
+                         sd(dl_results)/sqrt(length(dl_results))
+  )) %>% 
+  bind_rows(data_frame(model = "Random Forest", 
+                       ymin = rf_results %>% 
+                         median - qt(0.975, df = length(rf_results) - 1) * 
+                         sd(rf_results)/sqrt(length(rf_results)), 
+                       y = rf_results %>% 
+                         median, 
+                       ymax = rf_results %>% 
+                         median + qt(0.975, df = length(rf_results) - 1) * 
+                         sd(rf_results)/sqrt(length(rf_results))
+  )) %>% 
+  bind_rows(data_frame(model = "Gradient Boosted Machine", 
+                       ymin = gbm_results %>% 
+                         median - qt(0.975, df = length(gbm_results) - 1) * 
+                         sd(gbm_results)/sqrt(length(gbm_results)), 
+                       y = gbm_results %>% 
+                         median, 
+                       ymax = gbm_results %>% 
+                         median + qt(0.975, df = length(gbm_results) - 1) * 
+                         sd(gbm_results)/sqrt(length(gbm_results))
+  )) %>% 
+  bind_rows(data_frame(model = "Stacked Ensemble", 
+                       ymin = stacked_model_results %>% 
+                         median - qt(0.975, df = length(stacked_model_results) - 1) * 
+                         sd(stacked_model_results)/sqrt(length(stacked_model_results)), 
+                       y = stacked_model_results %>% 
+                         median, 
+                       ymax = stacked_model_results %>% 
+                         median + qt(0.975, df = length(stacked_model_results) - 1) * 
+                         sd(stacked_model_results)/sqrt(length(stacked_model_results))
+  ))
+final_test_results
+
+# Build SVM model with svmRadial kernel and see performance results
+set.seed(444)
+svm_radial_model <- train(Purchase ~ ., 
+                          data = train, 
+                          method = 'svmRadial',  
+                          trControl = trainControl(method = "cv",
+                                                   number = 10,
+                                                   summaryFunction = twoClassSummary,
+                                                   classProbs = TRUE,
+                                                   returnResamp = "final"
+                          ),
+                          preProc = c("center","scale"),
+                          metric = "ROC",
+                          verbose = FALSE,
+                          probability = TRUE,
+                          tuneGrid = expand.grid(sigma = .016, C = 1.95)
+)
+
+svm_radial_model_results <- c()
+for (i in 1:100) {
+  idx <- sample_frac(test, 1, replace = T)
+  svm_radial_model_results[i] <- (predict(svm_radial_model, idx, type = "prob") %>% 
+                                    select(MinuteMaid) %>% 
+                                    prediction(idx$Purchase) %>% 
+                                    performance("auc"))@y.values[[1]][1]
+}
+
+# Build SVM model with gaussprRadial kernel and see performance results
+set.seed(444)
+svm_gaussprRadial_model <- train(Purchase ~ ., 
+                                 data = train, 
+                                 method = "gaussprRadial",  
+                                 trControl = trainControl(method = "cv",
+                                                          number = 10,
+                                                          summaryFunction = twoClassSummary,
+                                                          classProbs = TRUE,
+                                                          returnResamp = "final"
+                                 ),
+                                 preProc = c("center","scale"),
+                                 metric = "ROC",
+                                 verbose = FALSE,
+                                 probability = TRUE,
+                                 tuneGrid = expand.grid(sigma = .0255556)
+)
+
+svm_gaussprRadial_model_results <- c()
+for (i in 1:100) {
+  idx <- sample_frac(test, 1, replace = T)
+  svm_gaussprRadial_model_results[i] <- (predict(svm_gaussprRadial_model, idx, type = "prob") %>% 
+                                           select(MinuteMaid) %>% 
+                                           prediction(idx$Purchase) %>% 
+                                           performance("auc"))@y.values[[1]][1]
+}
+
+final_test_results %<>% 
+  bind_rows(data_frame(model = "svmRadial Kernel", 
+                       ymin = svm_radial_model_results %>% 
+                         median - qt(0.975, df = length(svm_radial_model_results) - 1) * 
+                         sd(svm_radial_model_results)/sqrt(length(svm_radial_model_results)), 
+                       y = svm_radial_model_results %>% 
+                         median, 
+                       ymax = svm_radial_model_results %>% 
+                         median + qt(0.975, df = length(svm_radial_model_results) - 1) * 
+                         sd(svm_radial_model_results)/sqrt(length(svm_radial_model_results))
+  )) %>% 
+  bind_rows(data_frame(model = "gaussprRadial Kernel", 
+                       ymin = svm_gaussprRadial_model_results %>% 
+                         median - qt(0.975, df = length(svm_gaussprRadial_model_results) - 1) * 
+                         sd(svm_gaussprRadial_model_results)/sqrt(length(svm_gaussprRadial_model_results)), 
+                       y = svm_gaussprRadial_model_results %>% 
+                         median, 
+                       ymax = svm_gaussprRadial_model_results %>% 
+                         median + qt(0.975, df = length(svm_gaussprRadial_model_results) - 1) * 
+                         sd(svm_gaussprRadial_model_results)/sqrt(length(svm_gaussprRadial_model_results))
+  ))
+
+list(svm_gaussprRadial_model, svm_radial_model) %>% 
+  resamples %>% 
+  summary
+
+list(svm_gaussprRadial_model, svm_radial_model) %>% 
+  resamples %>% 
+  bwplot(metric = "ROC", ylab = c("gaussian kernel", "radial kernel"))
+
+final_test_results <- bind_cols(final_test_results, data_frame(runtime = c(default_glm@model$run_time, dl@model$run_time, rf@model$run_time, gbm@model$run_time, stacked@model$run_time, svm_radial_model$times$everything[3] * 60, svm_gaussprRadial_model$times$everything[3] * 60)))
+
+final_test_results %>% 
+  mutate(isWinner = ifelse(y == max(y), 1, 0) %>% factor,
+         runtime = paste0(round(runtime), " secs")) %>% 
+  ggplot(aes(reorder(model, y), ymin = ymin, ymax = ymax, y = y, label = runtime)) +
+  geom_bar(aes(alpha = isWinner), stat = "identity") +
+  geom_text(y = .90, size = 3) +
+  geom_errorbar(color = "red", width = .4) +
+  coord_flip(ylim = c(.8, .9)) +
+  labs(title = "Detail view of differences in performance of models",
+       y = "AUC performance of model on bootstrap of holdout data",
+       x = element_blank()) +
+  theme(panel.background = element_blank(),
+        legend.position = "none") +
+  scale_alpha_discrete(range = c(.4,1))
+
+#Plot variable importances using standardized coefficients from glm, remove Month
+(h2o.glm(y = train_y, 
+x = (h2o_train %>% colnames %>% setdiff("Purchase") %>% setdiff("MonthofPurchase")),
+training_frame = h2o_train,
+family = "binomial",
+nfolds = 10,
+model_id = "default_glm", 
+fold_assignment = "Modulo", 
+keep_cross_validation_predictions = T,
+lambda = 0,
+compute_p_values = T,
+seed = 444
+))@model$coefficients_table %>% 
+as_tibble %>% 
+mutate(sign = factor(ifelse(standardized_coefficients >= 0, 1, 0)),
+significant = (ifelse(p_value <= .05, 1, 0) %>% factor)) %>%
+filter(!is.na(p_value)) %>% 
+ggplot(aes(x = reorder(names, abs(standardized_coefficients)), 
+y = abs(standardized_coefficients), 
+fill = sign,
+alpha = significant)) +
+geom_bar(stat = "identity") +
+coord_flip() +
+labs(title = "Brand loyalty and prices matter most",
+y = "Influence of each factor on a customer's decision to purchase Minute Maid",
+x = element_blank()) +
+theme(axis.text.x = element_blank(),
+axis.ticks.x = element_blank(),
+axis.ticks.y = element_blank(),
+legend.position = c(.75, 0.15),
+legend.title = element_blank(),
+panel.background = element_blank()
+) +
+scale_fill_discrete(breaks = c(1, 0),
+labels = c("MORE Likely to buy Minute Maid", "LESS likely to buy Minute Maid")
+) +
+scale_alpha_discrete(guide = "none", range = c(.15, 1))
+
+#Plot significance of each standardized coefficient using glm model
+(h2o.glm(y = train_y, 
+x = (h2o_train %>% colnames %>% setdiff("Purchase") %>% setdiff("MonthofPurchase")),
+training_frame = h2o_train,
+family = "binomial",
+nfolds = 10,
+model_id = "default_glm", 
+fold_assignment = "Modulo", 
+keep_cross_validation_predictions = T,
+lambda = 0,
+compute_p_values = T,
+seed = 444
+))@model$coefficients_table %>% 
+as_tibble %>% 
+transmute(names = names,
+p_value = p_value,
+significant = (ifelse(p_value <= .05, 1, 0) %>% factor),
+removed = ifelse(is.na(p_value), 1, 0)) %>% 
+filter(!is.na(significant)) %>% 
+ggplot(aes(reorder(names, -abs(p_value)), 
+1 - p_value, 
+fill = significant, 
+alpha = significant,
+label = round(p_value, 2))) +
+geom_bar(stat = "identity") +
+coord_flip() +
+labs(title = "Only a few factors in the model are statistically significant",
+y = "Statistical confidence that this result did not happen by chance",
+x = element_blank()) +
+theme(axis.text.x = element_blank(),
+axis.ticks.x = element_blank(),
+axis.ticks.y = element_blank(),
+legend.position = c(.75, 0.15),
+legend.title = element_blank(),
+panel.background = element_blank()
+) +
+geom_text(nudge_y = -.025, size = 3) +
+scale_fill_discrete(breaks = c(01,0), labels = c("Statistically significant", "Not statistically significant")) +
+scale_alpha_discrete(guide = "none", range = c(.35, 1))
+
+#Brand loyalty viz
+train %>% 
+select(Purchase, StoreID, LoyalCH) %>% 
+group_by(StoreID) %>% 
+ggplot(aes(StoreID, LoyalCH, fill = Purchase)) + 
+geom_boxplot() +
+labs(title = "Brand loyalty affects purchase differently in each store",
+x = element_blank(),
+y = "Loyalty to Citrus Hill") +
+scale_y_continuous(labels = percent) +
+theme(panel.background = element_blank())
+
+#Price sensitivity viz
+train %>% 
+select(MonthofPurchase, PriceCH, PriceMM, StoreID) %>% 
+gather(brand, price, -MonthofPurchase, -StoreID) %>% 
+group_by(MonthofPurchase, brand, StoreID) %>% 
+summarise(price = mean(price),
+purchases = n()) %>% 
+ggplot(aes(price, purchases, color = brand)) + 
+geom_point() +
+geom_smooth(method = "lm", se = F) +
+facet_wrap(~StoreID) +
+labs(title = "Higher price is correlated with more quantity purchased",
+subtitle = "...but only in Store7.  Why store7? Why is the correlation positive?",
+x = "Price",
+y = "Number of Monthly purchases",
+color = "Brand") +
+scale_x_continuous(labels = dollar) +
+scale_color_discrete(labels = c("Citrus Hill", "Minute Maid")) +
+theme(legend.position = c(.85, .25),
+panel.background = element_blank())
+
+#Sales over time viz (week and month to compare)
+train %>% 
+group_by(WeekofPurchase, StoreID) %>% 
+summarise(purchases = n()) %>% 
+ggplot(aes(WeekofPurchase, purchases, color = StoreID)) +
+geom_smooth(method = "lm", se = F) +
+geom_line(alpha = .25) +
+facet_wrap(~StoreID) +
+theme(panel.background = element_blank(),
+legend.position = "none") +
+labs(title = "Number of sales throughout the year",
+x = "Week of Purchase",
+y = "Number of Purchases")
+
+train %>% 
+group_by(MonthofPurchase, StoreID) %>% 
+summarise(purchases = n()) %>% 
+ggplot(aes(MonthofPurchase, purchases, color = StoreID)) +
+geom_smooth(method = "lm", se = F) +
+geom_line(alpha = .25) +
+facet_wrap(~StoreID) +
+theme(panel.background = element_blank(),
+legend.position = "none") +
+labs(title = "Number of sales throughout the year",
+x = "Month of Purchase",
+y = "Number of Purchases")
