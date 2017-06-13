@@ -25,14 +25,13 @@ df <- read_csv("oj.csv") %>%
   mutate(WeekofPurchase = WeekofPurchase - min(WeekofPurchase) + 1,
          MonthofPurchase = ceiling(WeekofPurchase/(52/12)),
          Purchase = ifelse(Purchase == "MM", 1, 0)
-         ) %>% 
-  select(-STORE, -Store7, -PctDiscMM, -PctDiscCH, -PriceDiff, -ListPriceDiff, -DiscMM, -DiscCH)
+         )
+  #select(-STORE, -Store7, -PctDiscMM, -PctDiscCH, -PriceDiff, -ListPriceDiff, -DiscMM, -DiscCH)
 
 #Build train and test set 
 df <- df[!duplicated(df),] #Found some duplicates in rows
 train <- df %>% sample_frac(.8)
 test  <- df %>% setdiff(train)
-
 
 ```
 
