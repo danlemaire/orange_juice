@@ -605,7 +605,23 @@ train %>%
           legend.position = "none") +
     labs(title = "Number of sales throughout the year",
          x = "Month of Purchase",
-         y = "Number of Purchases")
+         y = "Number of Purchases") +
+  scale_x_continuous(breaks = c(0,3,6,9,12))
+
+train %>% 
+  group_by(MonthofPurchase, StoreID, Purchase) %>% 
+  summarise(purchases = n()) %>% 
+  ggplot(aes(MonthofPurchase, purchases, color = Purchase)) +
+    geom_smooth(method = "lm", se = F) +
+    geom_line(alpha = .25) +
+    facet_wrap(~StoreID) +
+    theme(panel.background = element_blank(),
+          legend.position = c(.8, .2)) +
+    labs(title = "Number of sales throughout the year",
+         x = "Month of Purchase",
+         y = "Number of Purchases") +
+  scale_x_continuous(breaks = c(0,3,6,9,12)) +
+  scale_color_discrete()
 
 
 
